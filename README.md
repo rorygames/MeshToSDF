@@ -11,7 +11,6 @@ See the `MeshToSDF/Demo.unity` scene to see how to use.
     2. **Material output** - same as vfx graph output, but with a material. There's a `Slice Texture 3D` material in the `Editor` folder that can be used to debug the SDF. Put it on a plane and put it in to the Material output property to see a slice of the SDF.
     3. **Script output** - the SDF is available on the `outputRenderTexture` field of the component. The distance is stored in a RGBAFloat texture, in the RGB channels. Note that if you update the `offset` or `scale` or `sdfResolution` fields in a build, you also have to set `meshToSdfComponent.fieldsChanged = true`
 
-
 # How it works
 1. Convert the triangle mesh into voxels
   1. There are many "correct" ways to do this, for instance by iterating over the voxels that each triangle might intersect with and testing if it does intersect with any of them.
@@ -19,6 +18,18 @@ See the `MeshToSDF/Demo.unity` scene to see how to use.
    1. This would also be possible with a geometery or tesselation shader to split the triangles to be below the voxel resolution followed by marking the location of each vertex in the voxel texture as filled
 2. Flood fill the voxel texture using [Jump Flood Assignment](https://blog.demofox.org/2016/02/29/fast-voronoi-diagrams-and-distance-dield-textures-on-the-gpu-with-the-jump-flooding-algorithm/). This creates a voroni diagram with each voxel acting as a seed, AKA an unsigned distance field of the voxels.
 3. Subtract some constant from the unsigned distance field to thicken the surface a little bit. 
+
+# How to use Multi Mesh
+*This tutorial is primarily for the VFX graph.*
+1. Add the MultiMeshToSDF script to an object.
+2. Assign the default parameters of compute shaders (see MeshToSDF prefab).
+3. Assign your `VFX Property` (the SDF) and `VFX Transform Property` (the center and scale of the bounding box)
+4. Assign your skinned meshes in the `Skinned Meshes` parameter.
+
+# How Multi Mesh works
+Multi mesh builds off the core but generates a dynamically scaling 3D SDF based upon the number of skinned mesh renderers (SMR) present in the parameters. Each currently active SMR is combined into a single mesh and a single combined bounding box is created. The bounding box gives you the scale information that is then passed through to the VFX graph through the transform parameter (rotation is not needed as the bounding box is world space, a gizmo is drawn to show you the current bounding box being created). The bounding box is then scaled down slightly to ensure that it sits within the full SDF region (this is user modifiable).
+
+It can be easily expanded to include static meshes however I had no such need for them, feel free to add them if you wish.
 
 # Limitations & Improvements to make
 * Currently SDFs are hollow, however the VFX treats all SDFs as hollow anyway.
@@ -28,4 +39,4 @@ See the `MeshToSDF/Demo.unity` scene to see how to use.
 * Instead of each thread writing `numSamples` times into the voxel array, spawn `numTriangles * numSamples` threads and each thread writes 1 sample into the array. Maybe this is faster?
 * Try the geometry shader technique. It used to be annoying to do this, but apparently is easier in HDRP.
 * There's no need for the dependency on the VFX graph except for the demo scene.
-*
+* The above statement is slightly less true for multi mesh.

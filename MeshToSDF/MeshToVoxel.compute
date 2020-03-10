@@ -9,6 +9,7 @@ int numSamples;
 half scale;
 half3 offset;
 uint voxelSide;
+half3 scale3d;
 
 StructuredBuffer<half3> VertexBuffer;
 StructuredBuffer<int> IndexBuffer;
@@ -18,7 +19,6 @@ RWTexture3D<half4> Voxels;
 half2 plastic(half index) {
 	return half2(0.5 + frac(0.7548776662466927 * index), 0.5 + frac(0.5698402909980532 * index));
 }
-
 
 // sample num, triangle basis vectors
 half3 triangleSample(int n, half3 A, half3 B) {
@@ -38,9 +38,9 @@ void MeshToVoxel(uint3 id : SV_DispatchThreadID)
 {
 	uint triID = id.x * 3;
 	if (triID >= tris * 3) return;
-	half3 a = VertexBuffer[IndexBuffer[triID + 0]] * scale + offset;
-	half3 b = VertexBuffer[IndexBuffer[triID + 1]] * scale + offset;
-	half3 c = VertexBuffer[IndexBuffer[triID + 2]] * scale + offset;
+	half3 a = VertexBuffer[IndexBuffer[triID + 0]] * scale3d + offset;
+	half3 b = VertexBuffer[IndexBuffer[triID + 1]] * scale3d + offset;
+	half3 c = VertexBuffer[IndexBuffer[triID + 2]] * scale3d + offset;
 	half3 AB = b - a;
 	half3 AC = c - a;
 	half side = half(voxelSide);
@@ -49,7 +49,7 @@ void MeshToVoxel(uint3 id : SV_DispatchThreadID)
 		half2 s = half2(frac(0.7548776662466927 * i), frac(0.5698402909980532 * i));
 		s = s.x + s.y > 1.0 ? 1.0 - s : s;
 		half3 pointOnTri = a + s.x * AB + s.y * AC;
-		half3 scaled = pointOnTri * side;
+		half3 scaled = pointOnTri * (side);
 		uint3 voxelIdx = uint3(floor(scaled));
 		if (!(any(voxelIdx < 0) || any(voxelIdx >= voxelSide))) {
 			half distFromCenter = 1.0 - length(frac(scaled) - half3(0.5, 0.5, 0.5));

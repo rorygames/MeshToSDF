@@ -1,11 +1,24 @@
-﻿using System.Collections;
+using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.VFX;
+using System;
+using System.Linq;
 
+// Primarily for VFX graph.
 [ExecuteAlways]
-public class MeshToSDF : MonoBehaviour
+public class MultiMeshToSDF : MonoBehaviour
 {
+    [Serializable]
+    public class SkinnedOutputs
+    {
+        public SkinnedMeshRenderer skinnedMeshRenderer;
+        [HideInInspector]
+        public Mesh tempMesh;
+        [HideInInspector]
+        public CombineInstance combine;
+    }
+
     public bool executeInEditMode = false;
 
     public ComputeShader JFAImplementation;
@@ -14,39 +27,36 @@ public class MeshToSDF : MonoBehaviour
     [HideInInspector]
     public RenderTexture outputRenderTexture;
 
-    [Tooltip("Mesh to convert to SDF. One of Mesh or Skinned Mesh Renderer must be set")]
-    public Mesh staticMesh;
+    [Tooltip("Visual effect whose property to set with the output SDF texture")]
+    public VisualEffect vfxOutput;
+    [Tooltip("VFX Property for the SDF map")]
+    public string vfxProperty;
+    [Tooltip("VFX Property for the position and scale of the bounding box")]
+    public string vfxTransformProperty;
+    [Tooltip("The list of skinned mesh renderers used to drive the signed distance field")]
+    public List<SkinnedOutputs> skinnedMeshes = new List<SkinnedOutputs>();
+    Bounds outputCombinedBounds = new Bounds();
+    Mesh outputMesh, emptyMesh;
 
-    [Tooltip("Skinned mesh renderer to bake mesh from before converting to SDF.")]
-    public SkinnedMeshRenderer skinnedMeshRenderer;
+    public MeshFilter filterOutput;
 
     [Tooltip("Material whose property to set with the output SDF texture")]
     public Material materialOutput;
     public string materialProperty = "_Texture3D";
 
-    [Tooltip("Visual effect whose property to set with the output SDF texture")]
-    public VisualEffect vfxOutput;
-    public string vfxProperty = "Texture3D";
-
-    // Need to change this when any of the following 
-    // settings are changed in a build
-    // unlikely usecase but we support it :)
-    [HideInInspector]
-    public bool fieldsChanged = true;
-
     [Tooltip("Signed distance field resoluton")]
     public int sdfResolution = 64;
 
-    [Tooltip("Offset the mesh before voxelization")]
-    public Vector3 offset = new Vector3(0.5f,0.5f,0.5f);
+    Vector3 offset = new Vector3(0.5f,0.5f,0.5f);
+    // 0.8f offset by default allows for the SDF to cleanly encapsulate the meshes at all times
     [Tooltip("Scale the mesh before voxelization")]
-    public Vector3 scaleBy = Vector3.one;
+    public float scaleBy = 0.8f;
+
+    public Vector3 currentScale = Vector3.zero, currentCenter = Vector3.zero;
     [Tooltip("Number of points to sample on each triangle when voxeling")]
     public uint samplesPerTriangle = 10;
     [Tooltip("Thicken the signed distance field by this amount")]
     public float postProcessThickness = 0.01f;
-
-    Mesh prevMesh;
 
     // kernel ids
     int JFA;
@@ -74,55 +84,102 @@ public class MeshToSDF : MonoBehaviour
         sdfResolution = Mathf.CeilToInt(Mathf.Pow(2, Mathf.Ceil(Mathf.Log(sdfResolution, 2))));
         if (outputRenderTexture != null) outputRenderTexture.Release();
         outputRenderTexture = null;
-        fieldsChanged = true;
-    }
 
-    private void Start() {
-        if(staticMesh == null) {
-            staticMesh = new Mesh();
-        }
-        skinnedMeshRenderer = skinnedMeshRenderer ?? GetComponent<SkinnedMeshRenderer>();
-
+        emptyMesh = new Mesh();
+        emptyMesh.vertices = new Vector3[] { Vector3.zero, Vector3.zero, Vector3.zero };
+        emptyMesh.triangles = new int[] { 0, 1, 2 };
+        emptyMesh.RecalculateBounds();
     }
 
     private void Update() {
         if (!Application.IsPlaying(gameObject) && !executeInEditMode) return;
 
+        if (outputMesh == null)
+            outputMesh = new Mesh();
+
         float t = Time.time;
 
-        Mesh _mesh;
-        if (skinnedMeshRenderer) {
-            _mesh = new Mesh();
-            skinnedMeshRenderer.BakeMesh(_mesh);
-        } else {
-            _mesh = this.staticMesh;
+        bool activeItems = false;
+        for (int i = 0; i < skinnedMeshes.Count; i++)
+        {
+            if (!skinnedMeshes[i].skinnedMeshRenderer.gameObject.activeInHierarchy)
+                continue;
+
+            activeItems = true;
+            break;
         }
 
-        if(skinnedMeshRenderer || prevMesh != staticMesh || fieldsChanged) {
-            prevMesh = _mesh;
-            fieldsChanged = false;
-            outputRenderTexture = MeshToVoxel(sdfResolution, _mesh, offset, scaleBy,
-    samplesPerTriangle, outputRenderTexture);
+        // Send a tiny empty mesh if nothing in the SDF.
+        if (!activeItems)
+        {
+            outputMesh = emptyMesh;
+            currentScale = Vector3.zero;
+            currentCenter = Vector3.zero;
+            outputCombinedBounds = emptyMesh.bounds;
+        }
+        else
+        {
+            currentScale = new Vector3(1f / outputCombinedBounds.size.x, 1f / outputCombinedBounds.size.y, 1f / outputCombinedBounds.size.z) * scaleBy;
+            currentCenter = outputCombinedBounds.center;
+            for (int i = 0; i < skinnedMeshes.Count; i++)
+            {
+                if (!skinnedMeshes[i].skinnedMeshRenderer.gameObject.activeInHierarchy)
+                    continue;
 
-            FloodFillToSDF(outputRenderTexture);
-            DestroyImmediate(_mesh);
+                if (skinnedMeshes[i].combine.mesh == null)
+                    skinnedMeshes[i].combine.mesh = new Mesh();
+                if (skinnedMeshes[i].tempMesh == null)
+                    skinnedMeshes[i].tempMesh = new Mesh();
+
+                skinnedMeshes[i].combine.transform = skinnedMeshes[i].skinnedMeshRenderer.transform.localToWorldMatrix;
+                skinnedMeshes[i].skinnedMeshRenderer.BakeMesh(skinnedMeshes[i].combine.mesh);
+
+            }
+
+            outputMesh.CombineMeshes(skinnedMeshes.Where(r => r.skinnedMeshRenderer.gameObject.activeInHierarchy).Select(s => s.combine).ToArray());
+            if (filterOutput)
+                filterOutput.mesh = outputMesh;
+
+            outputMesh.RecalculateBounds();
+            outputCombinedBounds = outputMesh.bounds;
+        }
+        
+        outputRenderTexture = MeshToVoxel(sdfResolution, outputMesh, outputCombinedBounds.center,
+                offset, currentScale, samplesPerTriangle,
+                outputRenderTexture);
+
+        FloodFillToSDF(outputRenderTexture);
+
+        if (vfxOutput)
+        {
+            if (!vfxOutput.HasTexture(vfxProperty))
+            {
+                Debug.LogError(string.Format("Vfx Output doesn't have property {0}", vfxProperty));
+            }
+            vfxOutput.SetTexture(vfxProperty, outputRenderTexture);
+            vfxOutput.SetVector3(vfxTransformProperty + "_position", (outputCombinedBounds.center));
+            vfxOutput.SetVector3(vfxTransformProperty + "_scale", new Vector3(1f / currentScale.x, 1f / currentScale.y, 1f / currentScale.z));
         }
 
-        if (materialOutput) {
-            if(!materialOutput.HasProperty(materialProperty)) {
+        if (materialOutput)
+        {
+            if (!materialOutput.HasProperty(materialProperty))
+            {
                 Debug.LogError(string.Format("Material output doesn't have property {0}", materialProperty));
-            } else {
+            }
+            else
+            {
                 materialOutput.SetTexture(materialProperty, outputRenderTexture);
             }
         }
+    }
 
-        if(vfxOutput) {
-            if(!vfxOutput.HasTexture(vfxProperty)) {
-                Debug.LogError(string.Format("Vfx Output doesn't have property {0}", vfxProperty));
-            } else {
-                vfxOutput.SetTexture(vfxProperty, outputRenderTexture);
-            }
-        }
+    private void OnDrawGizmos()
+    {
+        if (skinnedMeshes.Count == 0)
+            return;
+
+        Gizmos.DrawWireCube(outputCombinedBounds.center, outputCombinedBounds.size);
     }
 
     private void OnDestroy() {
@@ -176,8 +233,8 @@ public class MeshToSDF : MonoBehaviour
         return new Vector3(a.x / b.x, a.y / b.y, a.z / b.z);
     }
 
-    public RenderTexture MeshToVoxel(int voxelResolution, Mesh mesh,
-        Vector3 offset, Vector3 scaleMeshBy, uint numSamplesPerTriangle, 
+    public RenderTexture MeshToVoxel(int voxelResolution, Mesh mesh, Vector3 center,
+        Vector3 offset, Vector3 scaleMeshBy, uint numSamplesPerTriangle,
         RenderTexture voxels = null) {
         var indicies = mesh.triangles;
         var numIdxes = indicies.Length;
@@ -187,14 +244,11 @@ public class MeshToSDF : MonoBehaviour
 
         var vertexBuffer = cachedComputeBuffer(mesh.vertexCount, sizeof(float) * 3, 1);
         var verts = mesh.vertices;
-        if (skinnedMeshRenderer != null) {
-            var smr = skinnedMeshRenderer;
-            for (int i = 0; i < verts.Length; i++) {
-                verts[i] = Div(verts[i], smr.transform.lossyScale) - smr.rootBone.localPosition;
-            }
+        for (int i = 0; i < verts.Length; i++) {
+            verts[i] = verts[i] - center;
         }
         vertexBuffer.SetData(verts);
-        
+
         MtVImplementation.SetBuffer(MtV, "IndexBuffer", indicesBuffer);
         MtVImplementation.SetBuffer(MtV, "VertexBuffer", vertexBuffer);
         MtVImplementation.SetInt("tris", numTris);
